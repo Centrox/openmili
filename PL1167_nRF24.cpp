@@ -198,6 +198,7 @@ int PL1167_nRF24::transmit(uint8_t channel)
   int outp = 0;
 
   for (; outp < _receive_length; outp++) {
+    yield();
     uint8_t outbyte = 0;
 
     if (outp + 1 + _nrf_pipe_length < _preambleLength) {
@@ -238,6 +239,7 @@ int PL1167_nRF24::transmit(uint8_t channel)
   buffer = trailer >> (8 - (_trailerLength % 8));
   buffer_fill = _trailerLength % 8;
   for (int inp = 0; inp < _packet_length + (_crc ? 2 : 0) + 1; inp++) {
+    yield();
     if (inp < _packet_length) {
       buffer |= _packet[inp] << buffer_fill;
       buffer_fill += 8;
@@ -249,6 +251,7 @@ int PL1167_nRF24::transmit(uint8_t channel)
     }
 
     while (buffer_fill > (last_round ? 0 : 8)) {
+      yield();
       if (outp >= sizeof(tmp)) {
         return -1;
       }
