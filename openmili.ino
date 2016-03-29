@@ -8,7 +8,16 @@
 
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
-WiFiUDP Udp;
+
+WiFiUDP udp1;
+WiFiUDP udp2;
+WiFiUDP udp3;
+WiFiUDP udp4;
+
+uint8_t udp1Id[] = {0x63, 0xD2};
+uint8_t udp2Id[] = {0x63, 0xD3};
+uint8_t udp3Id[] = {0x63, 0xD0};
+uint8_t udp4Id[] = {0x63, 0xC2};
 
 const char* ssid     = "YOUR_SSID";
 const char* password = "YOUR_PWD";
@@ -18,8 +27,11 @@ char packetBuffer[255];
 //GPIO13 - MOSI - D7
 //GPIO14 - CLK - D5
 
-#define CE_PIN 16 // - D0 
-#define CSN_PIN 5 // - D1
+//#define CE_PIN 16 // - D0
+//#define CSN_PIN 5 // - D1
+
+#define CE_PIN D0 // - D0 
+#define CSN_PIN D8 // - D1
 
 RF24 radio(CE_PIN, CSN_PIN);
 PL1167_nRF24 prf(radio);
@@ -42,6 +54,10 @@ uint16_t calc_crc(uint8_t data[], uint8_t data_length = 0x08) {
   }
   return state;
 }
+
+uint8_t resendCounter = 0;
+uint8_t lastOnGroup = 0;
+long unsigned int lastMicros = 0;
 
 void setup()
 {
@@ -67,7 +83,10 @@ void setup()
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP());
 
-  Udp.begin(8899);
+  udp1.begin(8899);
+  udp2.begin(8898);
+  udp3.begin(8897);
+  udp4.begin(8896);
 
   printf_begin();
   delay(1000);
@@ -99,24 +118,14 @@ static uint8_t reverse_bits(uint8_t data) {
   return result;
 }
 
-void loop()
-{
-
+void udpLoop(WiFiUDP Udp, uint8_t id1, uint8_t id2) {
   int packetSize = Udp.parsePacket();
   if (packetSize)
   {
-    /*
-    Serial.print("Received packet of size ");
-    Serial.println(packetSize);
-    Serial.print("From ");
-    IPAddress remoteIp = Udp.remoteIP();
-    Serial.print(remoteIp);
-    Serial.print(", port ");
-    Serial.println(Udp.remotePort());
-    */
     // read the packet into packetBufffer
     int len = Udp.read(packetBuffer, 255);
     if (len > 0) packetBuffer[len] = 0;
+    Serial.println();
     Serial.print("Contents: ");
     for (int j = 0; j < len; j++) {
       Serial.print(packetBuffer[j], HEX);
@@ -125,57 +134,139 @@ void loop()
     Serial.println();
 
     outgoingPacketUDP[0] = 0xB0; // B0 - White | B8 - RGBW
-    outgoingPacketUDP[1] = 0x16; // Remote ID
-    outgoingPacketUDP[2] = 0x7D; // Remote ID
-    if (packetBuffer[0] == 0x40) {
-      outgoingPacketUDP[3] = abs((packetBuffer[1])-0xC8); // Color
+    outgoingPacketUDP[1] = id1; // Remote ID
+    outgoingPacketUDP[2] = id2; // Remote ID
+
+    if (packetBuffer[0] == 0x40) {  // Color
+      outgoingPacketUDP[3] = ((uint8_t)0xFF - packetBuffer[1]) + 0xC0;
+      outgoingPacketUDP[4] = lastOnGroup; // Use last ON group
       outgoingPacketUDP[5] = 0x0F; // Button
-    } else if (packetBuffer[0] == 0x4E) {
-      outgoingPacketUDP[4] = 0x191-(packetBuffer[1]*0x08); // Brightness
+
+    } else if (packetBuffer[0] == 0x4E) { // Brightness
+
+      // 2 to 1B (2-27)
+      // (0x90-0x00 and 0xF8-0xB0) increments of 8
+      // 0x90-0x00 = 1 to 18
+      // 0xB0-F8 = 19 to 27
+      /*
+       * x - 98
+       * x - 90
+       * x - 88
+       * 2 - 80*
+       * 3 - 78
+       * 4 - 70
+       * 5 - 68
+       * 6 - 60
+       * 7 - 58
+       * 8 -50
+       * 9 - 48
+       * 10 - 40
+       * 11 - 38
+       * 12 - 30
+       * 13 - 28
+       * 14 - 20
+       * 15 - 18
+       * 16 - 10
+       * 17 - 8
+       * 18 - 0
+       * 19 - F8
+       * 20 - F0
+       * 21 - E8
+       * 22 - E0
+       * 23 - D8
+       * 24 - D0
+       * 25 - C8
+       * 26 - C0
+       * 27 - B8*
+       * xx - B0
+       * xx - A8
+       */
+
+      if (packetBuffer[1] <= 18) {
+        outgoingPacketUDP[4] = (18 - packetBuffer[1]) * 0x08;
+      } else {
+        outgoingPacketUDP[4] = 0xB8 + (27 - packetBuffer[1]) * 0x08;
+      }
+      outgoingPacketUDP[4] += lastOnGroup; // add group number
       outgoingPacketUDP[5] = 0x0E; // Button
+
     } else if ((packetBuffer[0] & 0xF0) == 0xC0) {
       outgoingPacketUDP[5] = packetBuffer[0] - 0xB2; // Full White
+
+    } else if (packetBuffer[0] == 0x41) {   // Button RGBW COLOR LED ALL OFF
+      outgoingPacketUDP[5] = 0x02;
+    } else if (packetBuffer[0] == 0x42) {   // Button RGBW COLOR LED ALL ON
+      outgoingPacketUDP[5] = 0x01;
+      lastOnGroup = 0;
+    } else if (packetBuffer[0] == 0x45) {   // Group 1 ON
+      outgoingPacketUDP[5] = 0x03;
+      lastOnGroup = 1;
+    } else if (packetBuffer[0] == 0x46) {   // Group 1 OFF
+      outgoingPacketUDP[5] = 0x04;
+    } else if (packetBuffer[0] == 0x47) {   // Group 2 ON
+      outgoingPacketUDP[5] = 0x05;
+      lastOnGroup = 2;
+    } else if (packetBuffer[0] == 0x48) {   // Group 2 OFF
+      outgoingPacketUDP[5] = 0x06;
+    } else if (packetBuffer[0] == 0x49) {   // Group 3 ON
+      outgoingPacketUDP[5] = 0x07;
+      lastOnGroup = 3;
+    } else if (packetBuffer[0] == 0x4A) {   // Group 3 OFF
+      outgoingPacketUDP[5] = 0x08;
+    } else if (packetBuffer[0] == 0x4B) {   // Group 4 ON
+      outgoingPacketUDP[5] = 0x09;
+      lastOnGroup = 4;
+    } else if (packetBuffer[0] == 0x4C) {   // Group 5 OFF
+      outgoingPacketUDP[5] = 0x0A;
+
     } else {
+      Serial.println("Wooops!");
       outgoingPacketUDP[5] = packetBuffer[0] - 0x42; // Button
     }
     outgoingPacketUDP[6]++; // Counter
-/*
-    uint16_t value = calc_crc(outgoingPacketUDP);;
-    outgoingPacketUDP[7] = value & 0xff;
-    outgoingPacketUDP[8] = value >> 8;
-*/
+
     Serial.print("Write : ");
     for (int j = 0; j < sizeof(outgoingPacketUDP); j++) {
       Serial.print(outgoingPacketUDP[j], HEX);
       Serial.print(" ");
     }
     Serial.println();
+
     mlr.write(outgoingPacketUDP, sizeof(outgoingPacketUDP));
-    for (int k = 0; k < 4 ; k++) {
-      for (int j = 0; j < 10 ; j++) {
-        mlr.resend();
-      }
-      outgoingPacketUDP[6]++; // Counter
-      /*
-      uint16_t value = calc_crc(outgoingPacketUDP);;
-      outgoingPacketUDP[7] = value & 0xff;
-      outgoingPacketUDP[8] = value >> 8;
-      */
-    }
+    resendCounter = 16;
+    lastMicros = micros();
   }
   delay(0);
+
+  if (resendCounter > 0) {
+    if (micros() - 350 > lastMicros) {
+      mlr.resend();
+      resendCounter--;
+      Serial.print(".");
+      lastMicros = micros();
+    }
+  }
+}
+
+void loop()
+{
+
+  udpLoop(udp1, udp1Id[0], udp1Id[1]);
+  udpLoop(udp2, udp2Id[0], udp2Id[1]);
+  udpLoop(udp3, udp3Id[0], udp3Id[1]);
+  udpLoop(udp4, udp4Id[0], udp4Id[1]);
 
   if (receiving) {
     if (mlr.available()) {
       printf("\n");
-      Serial.println();
+      //Serial.println();
       uint8_t packet[7];
       size_t packet_length = sizeof(packet);
       mlr.read(packet, packet_length);
 
       for (int i = 0; i < packet_length; i++) {
-        Serial.print(packet[i], HEX);
-        Serial.print(" ");
+        //Serial.print(packet[i], HEX);
+        //Serial.print(" ");
         printf("%02X ", packet[i]);
       }
     }
